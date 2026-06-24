@@ -8,7 +8,7 @@ project-root/
 ├── backend/
 │   ├── main.py           ← FastAPI app + WebSocket room logic
 │   ├── requirements.txt
-│   ├── Dockerfile        ← targets Hugging Face Spaces (port 7860)
+│   ├── Dockerfile        ← reads $PORT dynamically (Railway-compatible)
 │   ├── README.md         ← HF Spaces metadata header
 │   └── test_live.py      ← integration tests against a live server
 └── frontend/
@@ -114,54 +114,27 @@ page.tsx (BoardPage)
 
 ## Deployment
 
-### 1. Backend → Hugging Face Spaces (Docker SDK)
+### 1. Backend → Railway
 
-Hugging Face Spaces' Docker SDK option runs any Docker image and exposes it at a stable HTTPS/WSS URL — free tier, no credit card required.
+Railway runs the Dockerfile directly and exposes it at a stable HTTPS/WSS domain — free tier available, and unlike some serverless platforms, processes stay warm rather than restarting on every idle period, which matters for a stateful in-memory WebSocket server like this one.
 
 **Step-by-step:**
 
-1. Create a free account at [huggingface.co](https://huggingface.co).
+1. Create a free account at [railway.com](https://railway.com).
 
-2. Go to **[huggingface.co/new-space](https://huggingface.co/new-space)**:
-   - Space name: e.g. `whiteboard-backend`
-   - SDK: **Docker**
-   - Hardware: **CPU Basic** (free)
-   - Visibility: **Public** (required for free tier WebSocket access)
+2. Push the contents of the `backend/` folder (`main.py`, `requirements.txt`, `Dockerfile`, `railway.json`) to a GitHub repo.
 
-3. Clone the empty Space repo the UI gives you:
+3. In Railway: **New Project → Deploy from GitHub repo** → select the repo. Railway auto-detects the `Dockerfile` and `railway.json` and deploys without further configuration.
+
+4. Go to **Settings → Networking → Generate Domain** to get a public HTTPS/WSS domain.
+
+5. Test it:
    ```bash
-   git clone https://huggingface.co/spaces/<your-username>/whiteboard-backend
-   cd whiteboard-backend
+   curl https://your-domain.up.railway.app/
+   # → {"status":"ok","service":"whiteboard-backend","rooms":0}
    ```
 
-4. Copy the contents of the `backend/` folder into the cloned repo (the Space root must contain `Dockerfile`, `main.py`, `requirements.txt`, `README.md`):
-   ```bash
-   cp -r /path/to/project/backend/* .
-   ```
-
-5. Commit and push:
-   ```bash
-   git add .
-   git commit -m "deploy whiteboard backend"
-   git push
-   ```
-
-6. Watch the **Logs** tab in your Space — in ~2 minutes you'll see:
-   ```
-   INFO:     Uvicorn running on http://0.0.0.0:7860
-   ```
-
-7. Your backend is now live at:
-   ```
-   https://<your-username>-whiteboard-backend.hf.space
-   ```
-   Test it:
-   ```bash
-   curl https://<your-username>-whiteboard-backend.hf.space/
-   # → {"status":"ok","service":"whiteboard-backend"}
-   ```
-
-> **Note on WebSockets and HF Spaces:** Hugging Face Spaces routes HTTP and WebSocket traffic through an nginx proxy. WebSocket connections work, but the proxy has a default idle timeout (~30 s). The frontend's reconnect logic handles this transparently — if the socket drops, the client reconnects and the server replays full board state.
+> **Note on WebSockets and reverse proxies in general:** most hosting platforms route WebSocket traffic through a reverse proxy with an idle-connection timeout (often 30-60s without traffic). This backend's ping/pong keepalive (see `main.py`) sends a heartbeat every 20 seconds specifically to keep connections alive through this kind of proxy, and the frontend's reconnect logic handles a drop gracefully regardless of the exact cause.
 
 ---
 
@@ -173,7 +146,7 @@ Hugging Face Spaces' Docker SDK option runs any Docker image and exposes it at a
 
 3. In **Project Settings → Environment Variables**, add:
    ```
-   NEXT_PUBLIC_WS_URL = wss://<your-username>-whiteboard-backend.hf.space
+   NEXT_PUBLIC_WS_URL = wss://your-domain.up.railway.app
    ```
    Use `wss://` (WebSocket Secure), not `https://`.
 
@@ -216,7 +189,7 @@ python3 test_live.py
 These are honest tradeoffs made deliberately for a demo. A production system would need to address them.
 
 ### Persistence
-Board history lives only in the FastAPI process's memory. If the backend restarts (Hugging Face Spaces restarts idle Spaces after ~15 minutes on the free tier), all room history is permanently lost. A production system would use a database (Postgres, Redis, etc.) to persist stroke history.
+Board history lives only in the FastAPI process's memory. If the backend process restarts for any reason, all room history is permanently lost. A production system would use a database (Postgres, Redis, etc.) to persist stroke history.
 
 ### Scalability
 The in-memory `rooms` dict is local to one process. Two backend processes (e.g. multiple Gunicorn workers or multiple Spaces replicas) would each have their own separate dict, so clients would be silently split across different state islands. Fixing this requires a shared message bus (Redis Pub/Sub is the conventional choice) so every process can broadcast to every client regardless of which process they connected to.
@@ -231,7 +204,7 @@ There is no stroke limit per room. A room with many users drawing for a long tim
 There is no authentication, no rate limiting, and no input validation beyond JSON parsing. Room IDs are the only access control — anyone who knows (or guesses) a room ID can join and draw on that board. The backend's CORS policy is fully open (`*`). Tighten all of this before exposing to untrusted users.
 
 ### WebSocket idle timeouts
-Hugging Face Spaces' nginx proxy may close idle WebSocket connections (~30 s without traffic). The frontend reconnect loop handles this, but a client that was idle (not moving the mouse or drawing) for 30 seconds may briefly see "Disconnected" in the status indicator before auto-reconnecting and reloading the board state.
+Most hosting platforms route WebSocket traffic through a reverse proxy that closes idle connections after some timeout (commonly 30-60s without traffic). The backend's ping/pong keepalive (every 20s) is designed to prevent this in normal operation, but a client that was already disconnected for another reason (e.g. a mobile network drop) may briefly see "Disconnected" in the status indicator before auto-reconnecting and reloading board state.
 
 ### Aspect-ratio drift in coordinates
 Coordinates are normalized as fractions of canvas width and height independently. On two clients with very different aspect ratios (e.g. one landscape, one portrait), a diagonal stroke will look slightly different in angle. True aspect-ratio–correct normalization would require agreeing on a fixed logical canvas size and letter-boxing, which adds frontend complexity for minimal real-world gain in a drawing app.
